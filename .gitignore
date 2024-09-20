@@ -1,0 +1,21 @@
+# macOS-specific files
+.DS_Store
+.Trashes
+*.swp
+
+# Python-specific files
+__pycache__/
+*.pyc
+*.pyo
+env/
+venv/
+
+# Common IDE/editor files
+.idea/
+.vscode/
+*.project
+*.pydevproject
+
+# Other potential files to ignore
+*.log
+.mypy_cache/
