@@ -1,0 +1,62 @@
+name: Train Model
+
+on:
+  workflow_dispatch:
+
+env:
+  MLFLOW_TRACKING_URI: databricks
+
+jobs:
+  training:
+    name: Training
+    runs-on: debian-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: "3.11.0"
+
+    - name: Install dependencies
+      run: pip install -r model/requirements.txt
+
+    - name: Run tests
+      run: pytest model/tests
+  
+    - name: Create a new run
+      run: |
+        MLFLOW_RUN_ID=$(python model/train/mlflow_run.py)
+        echo "MLFLOW_RUN_ID=$MLFLOW_RUN_ID" >> $GITHUB_ENV
+      env:
+        MLFLOW_TRACKING_URI: ${{ env.OUT_CONTAINER_MLFLOW_TRACKING_URI }}
+
+    - name: Create Docker image
+      run: docker build -t training -f model/Dockerfile ./model
+
+    - name: Download dataset
+      run: >
+        docker run -it \
+        -e MLFLOW_TRACKING_URI \
+        -e MLFLOW_RUN_ID \
+        -v ./temp_data/:/app/temp_data/ \
+        --network=shared_network \
+        training python training/download_dataset.py
+
+    - name: Preprocess
+      run: >
+        docker run -it \
+        -e MLFLOW_TRACKING_URI \
+        -e MLFLOW_RUN_ID \
+        -v ./temp_data/:/app/temp_data/ \
+        --network=shared_network \
+        training python training/preprocessing.py
+
+    - name: Run training
+      run: >
+        docker run -it \
+        -e MLFLOW_TRACKING_URI \
+        -e MLFLOW_RUN_ID \
+        -v ./temp_data/:/app/temp_data/ \
+        --network=shared_network \
+        training python training/train_model.py

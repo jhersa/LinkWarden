@@ -1,26 +1,89 @@
 services:
+  # frontend:
+  #   build: ./frontend
+  #   ports:
+  #     - 7010:8501
+  #   networks:
+  #     - frontend
+
+  # prediction_service:
+  #   build: ./prediction_service
+  #   environment:
+  #     - MLFLOW_TRACKING_URI=http://tracking_server:5000
+  #     - LOGSTASH_HOST=logstash
+  #     - LOGSTASH_PORT=5000
+  #   networks:
+  #     - shared_network
+  #     - frontend
+  #   ports:
+  #     - "5001:80"
+
+  elasticsearch:
+    platform: linux/x86_64
+    image: elasticsearch:7.17.24
+    restart: always
+    environment:
+      - discovery.type=single-node
+    networks:
+      - elk
+    volumes:
+      - elk_data:/usr/share/elasticsearch/data
+
+  logstash:
+    platform: linux/x86_64
+    image: logstash:7.17.24
+    restart: always
+    volumes:
+      - ./monitoring/logstash/pipeline:/usr/share/logstash/pipeline
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+
+  kibana:
+    platform: linux/x86_64
+    image: kibana:7.17.24
+    restart: always
+    ports:
+      - ${KIBANA_PORT:-6010}:5601
+    networks:
+      - elk
+    environment:
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTICSEARCH_HOSTS='["http://elasticsearch:9200"]'
+    volumes:
+      - elk_data:/usr/share/kibana/data
+    depends_on:
+      - elasticsearch
+
   postgres:
     platform: linux/x86_64
     image: postgres:16
-    restart: unless-stoped
+    restart: always
     environment:
-      - POSTGRES_USER=${PG_USER:=postgres}
-      - POSTGRES_PASSWORD=${PG_PASSWORD:=postgres}
-      - POSTGRES_DB=${PG_DATABASE:=mlflow}
+      - POSTGRES_USER=${PG_USER:-postgres}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:-postgres}
+      - POSTGRES_DB=${PG_DATABASE:-mlflow}
+    env_file:
+      - compose.env
     volumes:
       - pg_data:/var/lib/postgresql/data/
     networks:
-      - backend
+      - mlflow
 
   minio:
     platform: linux/x86_64
     image: minio/minio:RELEASE.2024-09-13T20-26-02Z.fips
-    restart: unless-stoped
+    restart: always
+    ports:
+      - ${MINIO_UI_PORT:-9010}:9001
     volumes:
       - minio_data:/data
     environment:
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:=minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_ACCESS_KEY:=minioadmin}
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_ACCESS_KEY:-minioadmin}
+    env_file:
+      - compose.env
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -28,47 +91,49 @@ services:
       timeout: 20s
       retries: 3
     networks:
-      - frontend
-      - backend
+      - mlflow
 
-  create_buckets:
+  buckets:
     platform: linux/x86_64
     image: minio/mc:RELEASE.2024-06-24T19-40-33Z.fips
     depends_on:
-      - s3
+      - minio
     networks:
-      - backend
+      - mlflow
+    env_file:
+      - compose.env
     entrypoint: >
       /bin/sh -c '
       sleep 5;
-      /usr/bin/mc config host add s3 http://s3:${MINIO_PORT} ${MINIO_ACCESS_KEY} ${MINIO_SECRET_ACCESS_KEY} --api S3v4;
-      /usr/bin/mc mb --ignore-existing s3/${MLFLOW_BUCKET_NAME};
-      /usr/bin/mc anonymous set download s3/${MLFLOW_BUCKET_NAME};
-      /usr/bin/mc anonymous set upload s3/${MLFLOW_BUCKET_NAME};
-      /usr/bin/mc anonymous set public s3/${MLFLOW_BUCKET_NAME};
+      /usr/bin/mc config host add s3 http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_ACCESS_KEY:-minioadmin} --api S3v4;
+      /usr/bin/mc mb --ignore-existing s3/${MLFLOW_BUCKET_NAME:-mlflow};
+      /usr/bin/mc anonymous set download s3/${MLFLOW_BUCKET_NAME:-mlflow};
+      /usr/bin/mc anonymous set upload s3/${MLFLOW_BUCKET_NAME:-mlflow};
+      /usr/bin/mc anonymous set public s3/${MLFLOW_BUCKET_NAME:-mlflow};
       exit 0;
       '
 
-  tracking_server:
-    depends_on:
-      - db
+  mlfow:
+    platform: linux/x86_64
+    image: bitnami/mlflow:2.16.2
     restart: always
-    image: bitnami/mlflow:2.14.1
+    depends_on:
+      - postgres
     ports:
-      - "${MLFLOW_PORT}:5000"
+      - ${MLFLOW_PORT:-8010}:5000
     networks:
-      - frontend
-      - backend
-      - shared_network
+      - mlflow
     environment:
-      - AWS_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
-      - AWS_SECRET_ACCESS_KEY=${MINIO_SECRET_ACCESS_KEY}
-      - MLFLOW_S3_ENDPOINT_URL=http://s3:${MINIO_PORT}
+      - AWS_ACCESS_KEY_ID=${MINIO_ACCESS_KEY:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_SECRET_ACCESS_KEY:-minioadmin}
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+    env_file:
+      - compose.env
     entrypoint: >
       /bin/sh -c '
       sleep 5;
       mlflow server \
-        --backend-store-uri postgresql://${PG_USER}:${PG_PASSWORD}@db:${PG_PORT}/${PG_DATABASE} \
+        --backend-store-uri postgresql://${PG_USER:-postgres}:${PG_PASSWORD:-postgres}@postgres:5432/${PG_DATABASE:-mlflow} \
         --host 0.0.0.0 \
         --port 5000 \
         --artifacts-destination s3://mlflow/;
@@ -77,11 +142,10 @@ services:
 volumes:
   pg_data:
   minio_data:
+  elk_data:
 
 networks:
-  frontend:
+  elk:
     driver: bridge
-  backend:
+  mlflow:
     driver: bridge
-  shared_network:
-    external: true
